@@ -1,11 +1,14 @@
 {
     "$schema": "https://getcomposer.org/schema.json",
-    "name": "laravel/react-starter-kit",
+    "name": "laravel-worktrees/starter-kit",
     "type": "project",
-    "description": "The skeleton application for the Laravel framework.",
+    "description": "A Laravel starter kit with first-party Worktrunk worktree lifecycle management.",
     "keywords": [
         "laravel",
-        "framework"
+        "framework",
+        "sail",
+        "worktrees",
+        "worktrunk"
     ],
     "license": "MIT",
     "require": {

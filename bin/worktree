@@ -1,0 +1,331 @@
+#!/bin/sh
+
+set -eu
+
+readonly ENV_FILE='.env'
+readonly COMPOSER_IMAGE='composer:2'
+
+usage() {
+    cat <<'EOF'
+Usage:
+  bin/worktree setup --branch <branch> --project <compose-project> --app-port <port>
+  bin/worktree vite --branch <branch> --project <compose-project>
+  bin/worktree stop --branch <branch> --project <compose-project>
+  bin/worktree destroy --branch <branch> --project <compose-project>
+EOF
+}
+
+fail() {
+    printf 'Error: %s\n' "$*" >&2
+    exit 1
+}
+
+note() {
+    printf '==> %s\n' "$*"
+}
+
+require_command() {
+    command -v "$1" >/dev/null 2>&1 || fail "Required command not found: $1"
+}
+
+environment_value() {
+    key="$1"
+
+    awk -v key="$key" '
+        substr($0, 1, length(key) + 1) == key "=" {
+            value = substr($0, length(key) + 2)
+        }
+        END { print value }
+    ' "$ENV_FILE"
+}
+
+assert_managed_environment() {
+    [ -f "$ENV_FILE" ] || fail "$ENV_FILE is missing; refusing to operate on an unknown Compose project"
+
+    managed="$(environment_value SAIL_WORKTREE_MANAGED)"
+    configured_branch="$(environment_value SAIL_WORKTREE_BRANCH)"
+    configured_project="$(environment_value SAIL_WORKTREE_PROJECT)"
+
+    [ "$managed" = '1' ] || fail "$ENV_FILE is not marked as Worktrunk-managed; refusing to continue"
+    [ "$configured_branch" = "$branch" ] || fail "$ENV_FILE belongs to branch '$configured_branch', not '$branch'; run 'wt setup' after renaming a branch"
+    [ "$configured_project" = "$project" ] || fail "$ENV_FILE belongs to Compose project '$configured_project', not '$project'; refusing to continue"
+}
+
+write_managed_environment() {
+    if [ ! -f "$ENV_FILE" ]; then
+        [ -f .env.example ] || fail '.env.example is missing'
+        cp .env.example "$ENV_FILE"
+    fi
+
+    managed_keys='SAIL_WORKTREE_MANAGED SAIL_WORKTREE_BRANCH SAIL_WORKTREE_PROJECT COMPOSE_PROJECT_NAME APP_URL APP_PORT VITE_PORT SESSION_COOKIE DB_CONNECTION DB_HOST DB_PORT DB_DATABASE DB_USERNAME DB_PASSWORD CACHE_STORE REDIS_HOST REDIS_PORT MAIL_MAILER MAIL_HOST MAIL_PORT TYPESENSE_HOST TYPESENSE_PORT TYPESENSE_PROTOCOL TYPESENSE_API_KEY AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_DEFAULT_REGION AWS_BUCKET AWS_ENDPOINT AWS_USE_PATH_STYLE_ENDPOINT FORWARD_DB_PORT FORWARD_VALKEY_PORT FORWARD_TYPESENSE_PORT FORWARD_RUSTFS_PORT FORWARD_RUSTFS_CONSOLE_PORT FORWARD_MAILPIT_PORT FORWARD_MAILPIT_DASHBOARD_PORT'
+    temporary_environment="$(mktemp "${ENV_FILE}.worktree.XXXXXX")" || fail "Unable to create a temporary $ENV_FILE"
+    trap 'rm -f "$temporary_environment"' 0 1 2 15
+
+    awk -v managed_keys="$managed_keys" '
+        BEGIN {
+            count = split(managed_keys, keys, " ")
+            for (key_index = 1; key_index <= count; key_index++) {
+                managed[keys[key_index]] = 1
+            }
+        }
+        {
+            key = $0
+            sub(/=.*/, "", key)
+
+            if (key in managed) {
+                next
+            }
+
+            print
+        }
+    ' "$ENV_FILE" > "$temporary_environment"
+
+    cat >> "$temporary_environment" <<EOF
+
+# Managed by bin/worktree. Run wt setup after changing branches or local ports.
+SAIL_WORKTREE_MANAGED=1
+SAIL_WORKTREE_BRANCH=$branch
+SAIL_WORKTREE_PROJECT=$project
+COMPOSE_PROJECT_NAME=$project
+APP_URL=http://localhost:$app_port
+APP_PORT=$app_port
+VITE_PORT=$vite_port
+SESSION_COOKIE=${project}_session
+
+DB_CONNECTION=pgsql
+DB_HOST=pgsql
+DB_PORT=5432
+DB_DATABASE=laravel
+DB_USERNAME=sail
+DB_PASSWORD=password
+
+CACHE_STORE=redis
+REDIS_HOST=valkey
+REDIS_PORT=6379
+
+MAIL_MAILER=smtp
+MAIL_HOST=mailpit
+MAIL_PORT=1025
+
+TYPESENSE_HOST=typesense
+TYPESENSE_PORT=8108
+TYPESENSE_PROTOCOL=http
+TYPESENSE_API_KEY=xyz
+
+AWS_ACCESS_KEY_ID=sail
+AWS_SECRET_ACCESS_KEY=password
+AWS_DEFAULT_REGION=us-east-1
+AWS_BUCKET=local
+AWS_ENDPOINT=http://rustfs:9000
+AWS_USE_PATH_STYLE_ENDPOINT=true
+
+FORWARD_DB_PORT=$database_port
+FORWARD_VALKEY_PORT=$valkey_port
+FORWARD_TYPESENSE_PORT=$typesense_port
+FORWARD_RUSTFS_PORT=$rustfs_port
+FORWARD_RUSTFS_CONSOLE_PORT=$rustfs_console_port
+FORWARD_MAILPIT_PORT=$mailpit_port
+FORWARD_MAILPIT_DASHBOARD_PORT=$mailpit_dashboard_port
+EOF
+
+    chmod 600 "$temporary_environment"
+    mv "$temporary_environment" "$ENV_FILE"
+    trap - 0 1 2 15
+}
+
+require_docker() {
+    require_command docker
+    docker compose version >/dev/null 2>&1 || fail 'Docker Compose v2 is required'
+    docker info >/dev/null 2>&1 || fail 'The Docker daemon is not available'
+}
+
+bootstrap_vendor() {
+    if [ -x vendor/bin/sail ]; then
+        return
+    fi
+
+    note 'Bootstrapping Composer dependencies before Sail is available'
+    docker run --rm \
+        --user "$(id -u):$(id -g)" \
+        --volume "$repository_root:/var/www/html" \
+        --workdir /var/www/html \
+        "$COMPOSER_IMAGE" \
+        install --ignore-platform-reqs --no-interaction --prefer-dist
+
+    [ -x vendor/bin/sail ] || fail 'Composer completed without creating vendor/bin/sail'
+}
+
+published_port() {
+    service="$1"
+    container_port="$2"
+    endpoint="$(docker compose --project-name "$project" port "$service" "$container_port" | awk 'NR == 1 { print; exit }')"
+
+    [ -n "$endpoint" ] || fail "Unable to resolve the published port for $service:$container_port"
+    printf '%s\n' "${endpoint##*:}"
+}
+
+show_endpoints() {
+    printf '\nWorktree development stack is ready:\n'
+    printf '  Application:       http://localhost:%s\n' "$app_port"
+    printf '  Vite:              http://localhost:%s\n' "$vite_port"
+    printf '  PostgreSQL:        localhost:%s\n' "$database_port"
+    printf '  Valkey:            localhost:%s\n' "$valkey_port"
+    printf '  Typesense:         http://localhost:%s\n' "$typesense_port"
+    printf '  RustFS API:        http://localhost:%s\n' "$rustfs_port"
+    printf '  RustFS console:    http://localhost:%s\n' "$rustfs_console_port"
+    printf '  Mailpit SMTP:      localhost:%s\n' "$mailpit_port"
+    printf '  Mailpit dashboard: http://localhost:%s\n' "$mailpit_dashboard_port"
+}
+
+command_name="${1:-}"
+[ -n "$command_name" ] || {
+    usage >&2
+    exit 1
+}
+shift
+
+branch=''
+project=''
+app_port=''
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --branch)
+            [ "$#" -ge 2 ] || fail '--branch requires a value'
+            branch="$2"
+            shift 2
+            ;;
+        --project)
+            [ "$#" -ge 2 ] || fail '--project requires a value'
+            project="$2"
+            shift 2
+            ;;
+        --app-port)
+            [ "$#" -ge 2 ] || fail '--app-port requires a value'
+            app_port="$2"
+            shift 2
+            ;;
+        --help|-h)
+            usage
+            exit 0
+            ;;
+        *)
+            fail "Unknown argument: $1"
+            ;;
+    esac
+done
+
+case "$command_name" in
+    setup|vite|stop|destroy)
+        ;;
+    *)
+        usage >&2
+        fail "Unknown command: $command_name"
+        ;;
+esac
+
+[ -n "$branch" ] || fail '--branch is required'
+[ -n "$project" ] || fail '--project is required'
+
+case "$project" in
+    [!a-z0-9]*|*[!a-z0-9_-]*)
+        fail "Invalid Compose project name: $project"
+        ;;
+esac
+
+[ "${#project}" -le 63 ] || fail 'Compose project names must be 63 characters or fewer'
+
+script_directory="$(CDPATH= cd "$(dirname "$0")" && pwd)"
+repository_root="$(CDPATH= cd "$script_directory/.." && pwd)"
+cd "$repository_root"
+
+[ -f compose.yaml ] || fail "compose.yaml was not found at $repository_root"
+require_docker
+
+export COMPOSE_PROJECT_NAME="$project"
+
+case "$command_name" in
+    setup)
+        case "$app_port" in
+            ''|*[!0-9]*)
+                fail '--app-port must be a number'
+                ;;
+        esac
+
+        if [ "$app_port" -lt 10000 ] || [ "$app_port" -gt 19999 ]; then
+            fail '--app-port must be within Worktrunk hash_port range 10000-19999'
+        fi
+
+        vite_port=$((app_port + 10000))
+        database_port=0
+        valkey_port=0
+        typesense_port=0
+        rustfs_port=0
+        rustfs_console_port=0
+        mailpit_port=0
+        mailpit_dashboard_port=0
+
+        write_managed_environment
+        bootstrap_vendor
+
+        note 'Starting the isolated Sail stack'
+        vendor/bin/sail up -d --wait --wait-timeout 240
+
+        database_port="$(published_port pgsql 5432)"
+        valkey_port="$(published_port valkey 6379)"
+        typesense_port="$(published_port typesense 8108)"
+        rustfs_port="$(published_port rustfs 9000)"
+        rustfs_console_port="$(published_port rustfs 9001)"
+        mailpit_port="$(published_port mailpit 1025)"
+        mailpit_dashboard_port="$(published_port mailpit 8025)"
+
+        note 'Installing PHP dependencies inside Sail'
+        vendor/bin/sail composer install --no-interaction --prefer-dist
+
+        note 'Installing JavaScript dependencies inside Sail'
+        vendor/bin/sail npm install --no-save --no-audit --no-fund
+
+        app_key="$(environment_value APP_KEY)"
+        if [ -z "$app_key" ] || [ "$app_key" = '""' ] || [ "$app_key" = "''" ]; then
+            note 'Generating the application key'
+            vendor/bin/sail artisan key:generate --force --no-interaction
+        fi
+
+        note 'Running database migrations (without seeders)'
+        vendor/bin/sail artisan migrate --force --no-interaction
+
+        note 'Building frontend assets'
+        vendor/bin/sail npm run build
+
+        show_endpoints
+        ;;
+    vite)
+        assert_managed_environment
+        vite_port="$(environment_value VITE_PORT)"
+
+        case "$vite_port" in
+            ''|*[!0-9]*)
+                fail "$ENV_FILE does not contain a valid VITE_PORT"
+                ;;
+        esac
+
+        if docker compose --project-name "$project" exec -T laravel.test \
+            curl --fail --silent --output /dev/null "http://127.0.0.1:$vite_port/@vite/client" 2>/dev/null; then
+            note "Vite is already running on port $vite_port"
+            exit 0
+        fi
+
+        note "Starting Vite on port $vite_port"
+        exec vendor/bin/sail npm run dev -- --host 0.0.0.0 --strictPort
+        ;;
+    stop)
+        assert_managed_environment
+        note "Stopping Compose project $project (volumes are preserved)"
+        docker compose --project-name "$project" stop
+        ;;
+    destroy)
+        assert_managed_environment
+        note "Destroying Compose project $project and its volumes"
+        docker compose --project-name "$project" down --volumes --remove-orphans
+        ;;
+esac

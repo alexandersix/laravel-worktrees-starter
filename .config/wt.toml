@@ -1,0 +1,22 @@
+# Worktrunk owns the local development lifecycle; Git still owns commits,
+# pushes, pull requests, and merges.
+
+[list]
+url = "http://localhost:{{ (repo ~ '-' ~ branch) | hash_port }}"
+
+[[pre-start]]
+copy_ignored = "wt step copy-ignored --require-include"
+
+[[pre-start]]
+sail = "bin/worktree setup --branch {{ branch }} --project {{ (repo ~ '-' ~ branch) | sanitize_db }} --app-port {{ (repo ~ '-' ~ branch) | hash_port }}"
+
+[post-start]
+vite = "wt step tether -- bin/worktree vite --branch {{ branch }} --project {{ (repo ~ '-' ~ branch) | sanitize_db }}"
+
+[pre-remove]
+sail = "bin/worktree destroy --branch {{ branch }} --project {{ (repo ~ '-' ~ branch) | sanitize_db }}"
+
+[aliases]
+setup = "bin/worktree setup --branch {{ branch }} --project {{ (repo ~ '-' ~ branch) | sanitize_db }} --app-port {{ (repo ~ '-' ~ branch) | hash_port }} && wt hook post-start"
+stop = "bin/worktree stop --branch {{ branch }} --project {{ (repo ~ '-' ~ branch) | sanitize_db }}"
+destroy = "bin/worktree destroy --branch {{ branch }} --project {{ (repo ~ '-' ~ branch) | sanitize_db }}"

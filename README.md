@@ -48,6 +48,7 @@ Common commands:
 wt list                         # list worktrees and application URLs
 wt stop                         # stop this Sail stack; keep containers and volumes
 wt setup                        # start or repair this stack and launch Vite
+wt ports                        # show this stack's service URLs and ports
 wt destroy                      # destroy this stack and all of its local volumes
 wt remove feature/example       # remove a merged worktree and run teardown
 ```
@@ -56,7 +57,7 @@ wt remove feature/example       # remove a merged worktree and run teardown
 
 ## Services and troubleshooting
 
-The setup command prints all assigned ports. The application and Vite ports are deterministic per worktree; Docker assigns collision-free host ports to the remaining services. The application URL is also shown by `wt list`. You can inspect a service port later with a command such as `vendor/bin/sail port pgsql 5432`.
+The setup command prints all assigned ports. Run `wt ports` to show the same summary again. The application and Vite ports are deterministic per worktree; Docker assigns collision-free host ports to the remaining services. The application URL is also shown by `wt list`. You can inspect an individual service port with a command such as `vendor/bin/sail port pgsql 5432`.
 
 Run application commands through Sail:
 

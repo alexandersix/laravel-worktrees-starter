@@ -9,6 +9,7 @@ usage() {
     cat <<'EOF'
 Usage:
   bin/worktree setup --branch <branch> --project <compose-project> --app-port <port>
+  bin/worktree ports --branch <branch> --project <compose-project>
   bin/worktree vite --branch <branch> --project <compose-project>
   bin/worktree stop --branch <branch> --project <compose-project>
   bin/worktree destroy --branch <branch> --project <compose-project>
@@ -164,6 +165,16 @@ published_port() {
     printf '%s\n' "${endpoint##*:}"
 }
 
+resolve_published_ports() {
+    database_port="$(published_port pgsql 5432)"
+    valkey_port="$(published_port valkey 6379)"
+    typesense_port="$(published_port typesense 8108)"
+    rustfs_port="$(published_port rustfs 9000)"
+    rustfs_console_port="$(published_port rustfs 9001)"
+    mailpit_port="$(published_port mailpit 1025)"
+    mailpit_dashboard_port="$(published_port mailpit 8025)"
+}
+
 show_endpoints() {
     printf '\nWorktree development stack is ready:\n'
     printf '  Application:       http://localhost:%s\n' "$app_port"
@@ -216,7 +227,7 @@ while [ "$#" -gt 0 ]; do
 done
 
 case "$command_name" in
-    setup|vite|stop|destroy)
+    setup|ports|vite|stop|destroy)
         ;;
     *)
         usage >&2
@@ -271,13 +282,7 @@ case "$command_name" in
         note 'Starting the isolated Sail stack'
         vendor/bin/sail up -d --wait --wait-timeout 240
 
-        database_port="$(published_port pgsql 5432)"
-        valkey_port="$(published_port valkey 6379)"
-        typesense_port="$(published_port typesense 8108)"
-        rustfs_port="$(published_port rustfs 9000)"
-        rustfs_console_port="$(published_port rustfs 9001)"
-        mailpit_port="$(published_port mailpit 1025)"
-        mailpit_dashboard_port="$(published_port mailpit 8025)"
+        resolve_published_ports
 
         note 'Installing PHP dependencies inside Sail'
         vendor/bin/sail composer install --no-interaction --prefer-dist
@@ -297,6 +302,26 @@ case "$command_name" in
         note 'Building frontend assets'
         vendor/bin/sail npm run build
 
+        show_endpoints
+        ;;
+    ports)
+        assert_managed_environment
+        app_port="$(environment_value APP_PORT)"
+        vite_port="$(environment_value VITE_PORT)"
+
+        case "$app_port" in
+            ''|*[!0-9]*)
+                fail "$ENV_FILE does not contain a valid APP_PORT"
+                ;;
+        esac
+
+        case "$vite_port" in
+            ''|*[!0-9]*)
+                fail "$ENV_FILE does not contain a valid VITE_PORT"
+                ;;
+        esac
+
+        resolve_published_ports
         show_endpoints
         ;;
     vite)

@@ -18,5 +18,6 @@ sail = "bin/worktree destroy --branch {{ branch }} --project {{ (repo ~ '-' ~ br
 
 [aliases]
 setup = "bin/worktree setup --branch {{ branch }} --project {{ (repo ~ '-' ~ branch) | sanitize_db }} --app-port {{ (repo ~ '-' ~ branch) | hash_port }} && wt hook post-start"
+ports = "bin/worktree ports --branch {{ branch }} --project {{ (repo ~ '-' ~ branch) | sanitize_db }}"
 stop = "bin/worktree stop --branch {{ branch }} --project {{ (repo ~ '-' ~ branch) | sanitize_db }}"
 destroy = "bin/worktree destroy --branch {{ branch }} --project {{ (repo ~ '-' ~ branch) | sanitize_db }}"
